@@ -175,130 +175,148 @@ async def send_connection_request(profile_url: str, note_text: str = None):
         await page.wait_for_timeout(2000)
         await context.browser.close()
 
+async def _like_activity_on_page(page, profile_url: str):
+    """
+    Core logic: navigate to a profile on an existing page, find the Activity
+    section, click 'Show all', and like up to 10 posts with slow human-like delays.
+    Does NOT open or close the browser.
+    """
+    import re
+    import random
+
+    print(f"\nNavigating to profile: {profile_url}")
+    await page.goto(profile_url)
+    await page.wait_for_timeout(3000)
+
+    try:
+        print("Scrolling to find the Activity section...")
+
+        for i in range(6):
+            await page.evaluate("window.scrollBy(0, 500)")
+            await page.wait_for_timeout(1000)
+
+        activity_heading = page.locator("h2, span").filter(has_text=re.compile(r"^Activity$", re.IGNORECASE)).first
+
+        if await activity_heading.count() > 0:
+            print("Found Activity section!")
+            await activity_heading.scroll_into_view_if_needed()
+            await page.wait_for_timeout(1000)
+
+            show_all_btn = page.locator("a[href*='recent-activity']").filter(has_text=re.compile(r"Show all", re.IGNORECASE)).first
+            if await show_all_btn.count() == 0:
+                show_all_btn = page.locator("a:has-text('Show all'), button:has-text('Show all')").first
+
+            if await show_all_btn.count() > 0:
+                print("Found 'Show all' button. Clicking it...")
+                await show_all_btn.click()
+                print("Success: Navigated to user's full activity page.")
+                await page.wait_for_timeout(4000)
+
+                print("\n--- Starting Auto-React Mode (max 10 posts) ---")
+                unliked = page.locator("button[aria-label='Reaction button state: no reaction']")
+                already_liked_count = await page.locator("button[aria-label='Reaction button state: Like']").count()
+                count = min(await unliked.count(), 10)
+                print(f"  -> Found: {await unliked.count()} unliked | Already liked: {already_liked_count} | Will like: {count}")
+
+                liked_count = 0
+                for _ in range(count):
+                    try:
+                        btn = unliked.first
+                        if await btn.count() == 0:
+                            break
+                        await btn.evaluate("""node => {
+                            node.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        }""")
+                        # Pause after scroll so the post is visible before clicking
+                        await page.wait_for_timeout(random.randint(1000, 2000))
+                        await btn.click()
+                        liked_count += 1
+                        print(f"     Liked post #{liked_count}!")
+                        # Random delay 4-8 seconds between each like
+                        delay = random.uniform(4, 8)
+                        print(f"     Waiting {delay:.1f}s before next like...")
+                        await asyncio.sleep(delay)
+                    except Exception as e:
+                        print(f"     [error] {e}")
+
+                print(f"\n--- Finished! Liked {liked_count} post(s) for {profile_url} ---")
+            else:
+                print("Could not find the 'Show all' button in the Activity section.")
+        else:
+            print("Could not find the Activity heading.")
+            with open("debug_activity.html", "w", encoding="utf-8") as f:
+                f.write(await page.content())
+            print("DEBUG: Saved raw HTML to debug_activity.html")
+
+    except Exception as e:
+        print(f"Failed to view activity: {e}")
+
+
 async def view_user_activity(profile_url: str):
-    """
-    Navigates to a LinkedIn profile, scrolls to the Activity section,
-    and clicks 'Show all' to view the user's posts/activity.
-    """
+    """Single-profile entry point: opens browser, likes up to 10 posts, closes browser."""
     async with async_playwright() as p:
         context = await browser_manager.get_authenticated_context(p, headless=False)
         page = await context.new_page()
-        
-        print(f"\nNavigating to profile: {profile_url}")
-        await page.goto(profile_url)
-        
-        # Give the profile page some initial time to load
-        await page.wait_for_timeout(3000)
-        
-        try:
-            print("Scrolling to find the Activity section...")
-            import re
-            
-            # Scroll down slowly to let sections render dynamically
-            for i in range(6):
-                await page.evaluate("window.scrollBy(0, 500)")
-                await page.wait_for_timeout(1000)
-                
-            # Usually, LinkedIn uses an h2 tag for the "Activity" section header.
-            # We look for something containing the text "Activity"
-            activity_heading = page.locator("h2, span").filter(has_text=re.compile(r"^Activity$", re.IGNORECASE)).first
-            
-            if await activity_heading.count() > 0:
-                print("Found Activity section!")
-                await activity_heading.scroll_into_view_if_needed()
-                await page.wait_for_timeout(1000)
-                
-                # In modern LinkedIn, the "Show all ->" button is an anchor with an href containing 'recent-activity'.
-                # Specifically, it includes text like "Show all [X] posts" or just "Show all"
-                show_all_btn = page.locator("a[href*='recent-activity']").filter(has_text=re.compile(r"Show all", re.IGNORECASE)).first
-                
-                # Fallback if the href structure changed but text is similar
-                if await show_all_btn.count() == 0:
-                    show_all_btn = page.locator("a:has-text('Show all'), button:has-text('Show all')").first
-                    
-                if await show_all_btn.count() > 0:
-                    print("Found 'Show all' button. Clicking it...")
-                    await show_all_btn.click()
-                    print("Success: Navigated to user's full activity page.")
-                    
-                    # Giving it a second to load the new feed so the user can verify
-                    await page.wait_for_timeout(4000)
-                    
-                    print("\n--- Starting Auto-React Mode ---")
-                    liked_count = 0
-                    last_height = 0
-                    stale_steps = 0  # consecutive steps with no new content
-
-                    for step in range(50):
-                        print(f"Scroll Step {step+1}...")
-
-                        # Like all currently-loaded unliked posts first
-                        unliked = page.locator("button[aria-label='Reaction button state: no reaction']")
-                        already_liked_count = await page.locator("button[aria-label='Reaction button state: Like']").count()
-                        count = await unliked.count()
-                        print(f"  -> Unliked: {count} | Already liked: {already_liked_count}")
-
-                        for _ in range(count):
-                            try:
-                                btn = unliked.first
-                                if await btn.count() == 0:
-                                    break
-                                await btn.evaluate("""node => {
-                                    node.scrollIntoView({behavior: 'instant', block: 'center'});
-                                    node.click();
-                                }""")
-                                liked_count += 1
-                                print(f"     Liked post #{liked_count}!")
-                                await page.wait_for_timeout(1500)
-                            except Exception as e:
-                                print(f"     [error] {e}")
-
-                        # Slow scroll — small steps with long pauses so LinkedIn's
-                        # infinite scroll has time to detect the position and fetch more posts
-                        for _ in range(6):
-                            await page.evaluate("window.scrollBy(0, 400)")
-                            await page.wait_for_timeout(1200)
-
-                        # Extra wait after scroll for LinkedIn to render newly fetched posts
-                        await page.wait_for_timeout(2500)
-
-                        # End-of-feed detection: only stop after 3 consecutive steps
-                        # with no height change AND no new unliked posts found
-                        new_height = await page.evaluate("document.body.scrollHeight")
-                        new_unliked = await page.locator("button[aria-label='Reaction button state: no reaction']").count()
-                        if new_height == last_height and new_unliked == 0:
-                            stale_steps += 1
-                            print(f"  -> No new content ({stale_steps}/3 stale steps).")
-                            if stale_steps >= 3:
-                                print("  -> Reached end of feed, stopping.")
-                                break
-                        else:
-                            stale_steps = 0
-                        last_height = new_height
-                        
-                    print(f"\n--- Finished! Successfully liked {liked_count} new posts. ---")
-                else:
-                    print("Could not find the 'Show all' button in the Activity section.")
-            else:
-                print("Could not find the Activity heading. The user might not have recent activity visible, or we need to scroll further.")
-                with open("debug_activity.html", "w", encoding="utf-8") as f:
-                    f.write(await page.content())
-                print("DEBUG: Saved raw HTML to debug_activity.html")
-                
-        except Exception as e:
-            print(f"Failed to view activity: {e}")
-            
+        await _like_activity_on_page(page, profile_url)
         await page.wait_for_timeout(2000)
         await context.browser.close()
 
+
+async def run_activity_for_all_profiles():
+    """
+    Reads profile URLs from like/profile.json.
+    Opens the browser ONCE, processes each profile (up to 10 likes each),
+    waits 2 minutes in the same browser between profiles, then closes.
+    """
+    import json
+
+    profile_json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "like", "profile.json")
+    with open(profile_json_path, "r") as f:
+        profiles = json.load(f)
+
+    if not profiles:
+        print("No profiles found in profile.json.")
+        return
+
+    print(f"Loaded {len(profiles)} profile(s) from profile.json.\n")
+
+    async with async_playwright() as p:
+        context = await browser_manager.get_authenticated_context(p, headless=False)
+        page = await context.new_page()
+
+        for index, profile_url in enumerate(profiles, start=1):
+            print(f"\n[{index}/{len(profiles)}] Processing: {profile_url}")
+            await _like_activity_on_page(page, profile_url)
+
+            if index < len(profiles):
+                wait_seconds = 120
+                print(f"\nWaiting 2 minutes before next profile (browser stays open)...")
+                for elapsed in range(0, wait_seconds, 10):
+                    remaining = wait_seconds - elapsed
+                    print(f"  {remaining}s remaining...", end="\r")
+                    await asyncio.sleep(10)
+                print(f"  Done waiting. Moving to next profile.      ")
+
+        await context.browser.close()
+        print("\nAll profiles processed.")
+
+
 if __name__ == "__main__":
     import sys
-    # For testing: pass a post URL and test reaction
-    # python interactions.py react "https://www.linkedin.com/feed/update/urn:li:activity:XXX"
-    if len(sys.argv) > 2:
+    # Usage examples:
+    #   python interactions.py                          -> runs activity for all profiles in like/profile.json
+    #   python interactions.py react    <post_url>
+    #   python interactions.py comment  <post_url> <text>
+    #   python interactions.py connect  <profile_url>
+    #   python interactions.py activity <profile_url>
+
+    if len(sys.argv) == 1:
+        # No arguments: batch-process all profiles from profile.json
+        asyncio.run(run_activity_for_all_profiles())
+    elif len(sys.argv) > 2:
         action = sys.argv[1]
         url = sys.argv[2]
-        
+
         if action == "react":
             asyncio.run(react_to_post(url))
         elif action == "comment" and len(sys.argv) > 3:
@@ -307,3 +325,12 @@ if __name__ == "__main__":
             asyncio.run(send_connection_request(url, sys.argv[3] if len(sys.argv) > 3 else None))
         elif action == "activity":
             asyncio.run(view_user_activity(url))
+        else:
+            print(f"Unknown action '{action}'. Valid actions: react, comment, connect, activity")
+    else:
+        print("Usage:")
+        print("  python interactions.py                            # batch from like/profile.json")
+        print("  python interactions.py activity  <profile_url>")
+        print("  python interactions.py connect   <profile_url>")
+        print("  python interactions.py react     <post_url>")
+        print("  python interactions.py comment   <post_url> <text>")
