@@ -24,6 +24,41 @@ async def send_alert(message: str, channel: str = SLACK_CHANNEL_ALERTS):
     except SlackApiError as e:
         print(f"Error sending message to Slack: {e.response['error']}")
 
+async def send_repost_digest(posts: list):
+    """Sends a formatted digest of highly scored posts to the repost-suggestions channel."""
+    if not posts: return
+    
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "📢 Content Agent: Repost Suggestions (Morning Digest)",
+                "emoji": True
+            }
+        }
+    ]
+    
+    for idx, p in enumerate(posts, 1):
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{idx}. [Score: {p['score']}] {p['author_name']}*\n_{p['content'][:150]}..._\n\n*Why it matched:* {p['reasoning']}\n*Caption Idea:* {p['suggested_caption']}\n*Link:* <{p['post_url']}|View Post>"
+            }
+        })
+        blocks.append({"type": "divider"})
+        
+    if not _slack_client:
+        print("[SLACK SKIPPED] Repost Digest Dump:")
+        print(blocks)
+        return
+        
+    try:
+        await _slack_client.chat_postMessage(channel=SLACK_CHANNEL_CONTENT, blocks=blocks, text="New Repost Suggestions")
+    except SlackApiError as e:
+        print(f"Error sending digest to Slack: {e.response['error']}")
+
 async def handle_status_command():
     """Generates the response for /status."""
     health = await CircuitBreaker.status()
