@@ -34,12 +34,12 @@ async def react_to_post(post_url: str):
         await page.wait_for_timeout(2000)
         await context.browser.close()
 
-async def comment_on_post(post_url: str, comment_text: str):
+async def comment_on_post(post_url: str, comment_text: str, headless: bool = True):
     """
     Navigates to a specific post URL, types a comment, and posts it.
     """
     async with async_playwright() as p:
-        context = await browser_manager.get_authenticated_context(p, headless=False)
+        context = await browser_manager.get_authenticated_context(p, headless=headless)
         page = await context.new_page()
         
         print(f"\nNavigating to post to Comment: {post_url}")
@@ -68,8 +68,6 @@ async def comment_on_post(post_url: str, comment_text: str):
                 
                 # Check if it was found
                 if await submit_button.count() > 0:
-                    # HUMAN IN THE LOOP WAIT
-                    confirm = input(f"\n[HITL] Ready to post comment: '{comment_text}'. Press Enter to post, or Ctrl+C to cancel.")
                     await submit_button.click()
                     print("Success: Comment posted.")
                 else:
@@ -85,12 +83,12 @@ async def comment_on_post(post_url: str, comment_text: str):
         await page.wait_for_timeout(2000)
         await context.browser.close()
 
-async def send_connection_request(profile_url: str, note_text: str = None):
+async def send_connection_request(profile_url: str, note_text: str = None, headless: bool = True):
     """
     Navigates to a LinkedIn profile and sends a connection request with an optional note.
     """
     async with async_playwright() as p:
-        context = await browser_manager.get_authenticated_context(p, headless=False)
+        context = await browser_manager.get_authenticated_context(p, headless=headless)
         page = await context.new_page()
         
         print(f"\nNavigating to profile to Connect: {profile_url}")
@@ -150,9 +148,6 @@ async def send_connection_request(profile_url: str, note_text: str = None):
                     f.write(await page.content())
                 print("DEBUG: Saved raw HTML to debug_connect.html")
                 
-                # HUMAN IN THE LOOP WAIT
-                confirm = input(f"\n[HITL] Ready to send connection request to {profile_url}. Press Enter to send, or Ctrl+C to cancel.")
-                
                 await send_btn.click()
                 print("Success: Connection request sent.")
             else:
@@ -168,6 +163,39 @@ async def send_connection_request(profile_url: str, note_text: str = None):
             
         await page.wait_for_timeout(2000)
         await context.browser.close()
+
+async def repost_post(post_url: str):
+    """
+    Navigates to a specific post URL and clicks the Repost button to repost without additional text.
+    """
+    async with async_playwright() as p:
+        context = await browser_manager.get_authenticated_context(p, headless=True)
+        page = await context.new_page()
+
+        print(f"\nNavigating to post to Repost: {post_url}")
+        await page.goto(post_url)
+        await page.wait_for_timeout(3000)
+
+        try:
+            repost_btn = page.locator("button[aria-label*='Repost'], button[aria-label*='repost']").first
+            if await repost_btn.count() > 0:
+                await repost_btn.click()
+                await page.wait_for_timeout(1000)
+                # Confirm plain "Repost" in the dropdown (not "Repost with your thoughts")
+                confirm_btn = page.locator("div[role='menu'] span:has-text('Repost'), button:has-text('Repost')").first
+                if await confirm_btn.count() > 0:
+                    await confirm_btn.click()
+                    print("Success: Reposted.")
+                else:
+                    print("Could not find Repost confirm button in dropdown.")
+            else:
+                print("Could not find the Repost button.")
+        except Exception as e:
+            print(f"Failed to repost: {e}")
+
+        await page.wait_for_timeout(2000)
+        await context.browser.close()
+
 
 if __name__ == "__main__":
     import sys
