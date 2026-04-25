@@ -4,22 +4,18 @@
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
 
-# Byte-compiled / optimized / DLL files
+# Byte-compiled
 __pycache__/
 *.py[cod]
 *$py.class
 
-# IDE / Editor
+# IDE
 .vscode/
 
-# Project specific
+# Project artifacts
+state.json
 debug_*.html
 *.db
-state.json
 scraped_posts.json
-mcp/
-langchain_mcp_client.py
-linkedin_agent.db
+cloudflared.exe

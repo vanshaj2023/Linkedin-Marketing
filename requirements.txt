@@ -9,4 +9,3 @@ playwright-stealth==1.0.*
 groq>=0.11
 slack-sdk==3.27.*
 python-dotenv==1.0.*
-aiohttp

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(python -c ':*)",
+      "Bash(ls -la *.md)"
+    ]
+  }
+}

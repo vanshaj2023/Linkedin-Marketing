@@ -1,3 +1,9 @@
+import asyncio
+import sys
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import hashlib
 import hmac
 import json
@@ -9,22 +15,22 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse
 
 from inngest_client import inngest_client
-from database import setup_indexes
-from warmup import apply_warmup_budget
+from db import setup_indexes
+from core.warmup import apply_warmup_budget
 from config import config
-from slack_bot import (
+from slack.bot import (
     handle_status_command,
     handle_pause_command,
     handle_resume_command,
     handle_referral_command,
 )
 
-# ── Import all Inngest functions ──────────────────────────────────────────────
-from action_queue import inngest_queue_processor, inngest_budget_reset
-from agents.connection_agent import connection_agent_run, connection_acceptance_poller
-from agents.content_agent import content_agent_reposts, content_agent_reactions
-from agents.job_hunter_agent import job_hunter_run
-from agents.referral_agent import referral_campaign_start, referral_on_connection_accepted
+# ── Import all Inngest functions ─────────────────────────────────────────────
+from core.action_queue import inngest_queue_processor, inngest_budget_reset
+from agents.connection import connection_agent_run, connection_acceptance_poller
+from agents.content import content_agent_reposts, content_agent_reactions
+from agents.job_hunter import job_hunter_run
+from agents.referral import referral_campaign_start, referral_on_connection_accepted
 
 ALL_FUNCTIONS = [
     inngest_queue_processor,
@@ -41,29 +47,23 @@ ALL_FUNCTIONS = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: create MongoDB indexes + apply today's warmup budget limits."""
     await setup_indexes()
     await apply_warmup_budget(week=config.WARMUP_WEEK)
-    print(
-        f"LinkedIn Automation started. "
-        f"DRY_RUN={config.DRY_RUN}, WARMUP_WEEK={config.WARMUP_WEEK}"
-    )
+    print(f"LinkedIn Automation started. DRY_RUN={config.DRY_RUN}, WARMUP_WEEK={config.WARMUP_WEEK}")
     yield
 
 
 app = FastAPI(title="LinkedIn Automation", lifespan=lifespan)
-
-# ── Register Inngest endpoint at /api/inngest ─────────────────────────────────
 inngest.fast_api.serve(app, inngest_client, ALL_FUNCTIONS, serve_path="/api/inngest")
 
 
-# ── Slack request signature verification ─────────────────────────────────────
+# ── Slack signature verification ─────────────────────────────────────────────
+
 def _verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
-    """Returns True if the Slack request signature is valid."""
     if not config.SLACK_SIGNING_SECRET:
-        return True  # Skip in local dev if secret is not configured
+        return True
     base = f"v0:{timestamp}:{body.decode()}"
-    expected = "v0=" + hmac.new(
+    expected = "v0=" + hmac.HMAC(
         config.SLACK_SIGNING_SECRET.encode(),
         base.encode(),
         hashlib.sha256,
@@ -71,42 +71,37 @@ def _verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool
     return hmac.compare_digest(expected, signature)
 
 
-# ── Slack Slash Commands ──────────────────────────────────────────────────────
+# ── Slack Slash Commands ─────────────────────────────────────────────────────
+
 @app.post("/slack/commands")
 async def slack_commands(request: Request):
-    """
-    Receives Slack slash commands:
-    /status  /pause  /resume  /dryrun on|off  /referral <Company>
-    """
     body = await request.body()
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     signature = request.headers.get("X-Slack-Signature", "")
 
-    # Reject requests older than 5 minutes (replay attack prevention)
     try:
         if abs(time.time() - float(timestamp)) > 300:
-            raise HTTPException(status_code=400, detail="Request timestamp too old")
+            raise HTTPException(status_code=400, detail="Timestamp too old")
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid timestamp")
 
     if not _verify_slack_signature(body, timestamp, signature):
-        raise HTTPException(status_code=403, detail="Invalid Slack signature")
+        raise HTTPException(status_code=403, detail="Invalid signature")
 
     form = await request.form()
     command = form.get("command", "")
     text = (form.get("text", "") or "").strip()
 
-    if command == "/status":
+    if command in ("/status", "/li-status"):
         msg = await handle_status_command()
     elif command == "/pause":
         msg = await handle_pause_command()
     elif command == "/resume":
         msg = await handle_resume_command()
     elif command == "/dryrun":
-        # Toggle dry-run at runtime (does NOT persist across server restarts)
         import config as cfg_module
         cfg_module.config.DRY_RUN = text.lower() == "on"
-        msg = f"Dry-run mode is now: *{'ON' if cfg_module.config.DRY_RUN else 'OFF'}*"
+        msg = f"Dry-run mode: *{'ON' if cfg_module.config.DRY_RUN else 'OFF'}*"
     elif command == "/referral":
         if not text:
             msg = "Usage: `/referral <Company Name>`"
@@ -118,54 +113,41 @@ async def slack_commands(request: Request):
     return JSONResponse({"response_type": "in_channel", "text": msg})
 
 
-# ── Slack Interactive Actions (button clicks) ─────────────────────────────────
+# ── Slack Interactive Actions ────────────────────────────────────────────────
+
 @app.post("/slack/actions")
 async def slack_actions(request: Request):
-    """
-    Handles Slack interactive component payloads (button clicks from job alerts,
-    repost digests, etc.).
-    """
-    body = await request.body()
     form = await request.form()
     try:
         payload = json.loads(form.get("payload", "{}"))
     except json.JSONDecodeError:
         return Response(status_code=400)
 
-    actions = payload.get("actions", [])
-    for action in actions:
+    for action in payload.get("actions", []):
         action_id = action.get("action_id", "")
         value = action.get("value", "")
 
         if action_id == "mark_applied":
             import datetime as dt
-            from database import db
+            from db import db
             await db.jobs.update_one(
                 {"linkedin_post_url": value},
                 {"$set": {"applied": True, "applied_at": dt.datetime.utcnow()}},
             )
-
         elif action_id == "trigger_referral":
-            # value is the company name
             await handle_referral_command(value)
-
         elif action_id == "repost_now":
-            from action_queue import ActionQueue
+            from core.action_queue import ActionQueue
             await ActionQueue.push(
-                "content", "repost",
-                {"post_url": value},
-                priority=3,
-                is_dry_run=config.DRY_RUN,
+                "content", "repost", {"post_url": value},
+                priority=3, is_dry_run=config.DRY_RUN,
             )
 
-        elif action_id in ("dismiss_job", "skip_repost"):
-            pass  # Just acknowledge — no action needed
-
-    # Slack requires a 200 response to dismiss the loading spinner
     return Response(status_code=200)
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
+# ── Health check ─────────────────────────────────────────────────────────────
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "dry_run": config.DRY_RUN, "warmup_week": config.WARMUP_WEEK}
