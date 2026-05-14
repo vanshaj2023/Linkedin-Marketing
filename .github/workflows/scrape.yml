@@ -1,0 +1,56 @@
+name: LinkedIn Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Scraper task: feed | hiring | people | jobs'
+        required: true
+        default: 'feed'
+      keyword:
+        description: 'Keyword for hiring/people/jobs tasks'
+        required: false
+        default: 'hiring'
+      max_results:
+        description: 'Max results to return'
+        required: false
+        default: '5'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Restore LinkedIn session
+        run: echo "${{ secrets.LINKEDIN_STATE_B64 }}" | base64 -d > state.json
+
+      - name: Run scraper
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          TASK: ${{ github.event.inputs.task }}
+          KEYWORD: ${{ github.event.inputs.keyword }}
+          MAX_RESULTS: ${{ github.event.inputs.max_results }}
+        run: python run_scraper.py
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-results-${{ github.run_id }}
+          path: output/
+          retention-days: 1

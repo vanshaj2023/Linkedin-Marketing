@@ -3,7 +3,8 @@
     "allow": [
       "Bash(mkdir:*)",
       "Bash(python -c ':*)",
-      "Bash(ls -la *.md)"
+      "Bash(ls -la *.md)",
+      "Bash(./venv/Scripts/python.exe -c \"import scrapers.feed, browser.interactions; print\\('ok'\\)\")"
     ]
   }
 }
