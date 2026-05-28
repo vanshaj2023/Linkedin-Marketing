@@ -1,10 +1,15 @@
 import re
 import random
 from playwright.async_api import async_playwright
-from browser.manager import get_authenticated_context, setup_page_stealth
+from browser.manager import get_authenticated_context, setup_page_stealth, safe_sleep
 
 
 URN_RE = re.compile(r"urn:li:[a-zA-Z]+:\d+")
+
+
+class ActionFailedError(Exception):
+    """Raised when a browser interaction fails in a way the queue should retry."""
+    pass
 
 
 async def _find_post_container(page, post_url: str):
@@ -41,22 +46,38 @@ async def react_to_post(post_url: str, headless: bool = True) -> dict:
 
         result = {"ok": False, "reason": "unknown"}
         try:
-            await page.goto(post_url)
+            await safe_sleep(1.0, 3.0)
+            await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(3000)
 
             scope = await _find_post_container(page, post_url)
 
             # Already-liked detection
-            unlike_btn = scope.locator("button[aria-label='React Unlike']").first
+            unlike_btn = scope.locator("button[aria-label*='Unlike']").first
             if await unlike_btn.count() > 0:
                 result = {"ok": True, "reason": "already_liked"}
                 print(f"Already liked: {post_url}")
             else:
-                like_btn = scope.locator("button[aria-label='React Like']").first
-                if await like_btn.count() == 0:
-                    like_btn = scope.locator("button[aria-label='Like']").first
+                # Try multiple selector strategies for Like button
+                like_btn = None
+                like_selectors = [
+                    "button[aria-label='React Like']",
+                    "button[aria-label='Like']",
+                    "button[aria-label*='like' i]",
+                ]
+                for sel in like_selectors:
+                    loc = scope.locator(sel).first
+                    if await loc.count() > 0:
+                        like_btn = loc
+                        break
 
-                if await like_btn.count() == 0:
+                # Fallback: find by role
+                if not like_btn:
+                    loc = scope.get_by_role("button", name=re.compile(r"like", re.IGNORECASE)).first
+                    if await loc.count() > 0:
+                        like_btn = loc
+
+                if not like_btn or await like_btn.count() == 0:
                     print("Like button not found.")
                     result = {"ok": False, "reason": "button_not_found"}
                 else:
@@ -73,7 +94,7 @@ async def react_to_post(post_url: str, headless: bool = True) -> dict:
             print(f"Failed to react: {e}")
             result = {"ok": False, "reason": f"exception:{e}"}
 
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(random.randint(1000, 2000))
         await context.browser.close()
         return result
 
@@ -87,12 +108,13 @@ async def comment_on_post(post_url: str, comment_text: str, headless: bool = Tru
 
         result = {"ok": False, "reason": "unknown"}
         try:
-            await page.goto(post_url)
+            await safe_sleep(1.0, 3.0)
+            await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(3000)
 
             scope = await _find_post_container(page, post_url)
 
-            # The comment form may not be inside `scope` (it's often a sibling of the post body);
+            # The comment form may not be inside `scope` (it's often a sibling);
             # fall back to page-level if we can't find it in scope.
             comment_box = scope.locator(
                 "div.comments-comment-box__form div[contenteditable='true'], "
@@ -142,7 +164,7 @@ async def comment_on_post(post_url: str, comment_text: str, headless: bool = Tru
             print(f"Failed to comment: {e}")
             result = {"ok": False, "reason": f"exception:{e}"}
 
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(random.randint(1000, 2000))
         await context.browser.close()
         return result
 
@@ -153,8 +175,11 @@ async def send_connection_request(
     """Navigate to a profile and send a connection request with optional note.
 
     Returns: {"ok": bool, "reason": str}
-        reason ∈ {"sent", "pending", "already_connected", "button_not_found",
-                  "weekly_limit", "send_failed", "exception:..."}
+        reason in {"sent", "pending", "already_connected", "button_not_found",
+                  "weekly_limit", "send_failed", "modal_missing", "exception:..."}
+
+    Raises ActionFailedError for retryable failures so the queue processor
+    can mark the action as failed and retry it.
     """
     async with async_playwright() as p:
         context = await get_authenticated_context(p, headless=headless)
@@ -163,35 +188,72 @@ async def send_connection_request(
 
         result = {"ok": False, "reason": "unknown"}
         try:
-            await page.goto(profile_url)
+            await safe_sleep(1.5, 4.0)
+            await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
             try:
                 await page.wait_for_selector("main", state="visible", timeout=15000)
             except Exception:
                 pass
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(random.randint(2000, 4000))
 
+            # Scope to profile top card
             top = page.locator(
-                "section.pv-top-card, section[data-member-id], section.artdeco-card"
+                "section.pv-top-card, section[data-member-id], "
+                "section.artdeco-card, main"
             ).first
             scope = top if await top.count() > 0 else page
 
-            # State detection
-            if await scope.locator("button[aria-label*='Pending']").count() > 0:
+            # ── State detection ──────────────────────────────────────────────
+
+            # Check if already pending
+            pending_btn = scope.locator("button[aria-label*='Pending']").first
+            if await pending_btn.count() == 0:
+                pending_btn = scope.get_by_role("button", name=re.compile(r"pending", re.IGNORECASE)).first
+            if await pending_btn.count() > 0:
                 print(f"Already pending: {profile_url}")
                 result = {"ok": False, "reason": "pending"}
                 await context.browser.close()
                 return result
 
-            direct_connect = scope.locator(
-                "button[aria-label='Connect'], "
-                "button[aria-label*='Invite'][aria-label*='connect']"
-            ).first
+            # ── Find Connect button ──────────────────────────────────────────
+            connect_clicked = False
 
-            if await direct_connect.count() == 0:
-                # Try the More overflow menu
+            # Strategy 1: Direct Connect button with multiple aria-label patterns
+            connect_selectors = [
+                "button[aria-label='Connect']",
+                "button[aria-label*='connect' i]",
+                "button[aria-label*='Invite'][aria-label*='connect' i]",
+                "button[aria-label*='Connect'][aria-label*='invite' i]",
+            ]
+            for sel in connect_selectors:
+                btn = scope.locator(sel).first
+                if await btn.count() > 0:
+                    await btn.click()
+                    connect_clicked = True
+                    break
+
+            # Strategy 2: Use getByRole with flexible name matching
+            if not connect_clicked:
+                role_btn = scope.get_by_role(
+                    "button", name=re.compile(r"connect", re.IGNORECASE)
+                ).first
+                if await role_btn.count() > 0:
+                    btn_text = (await role_btn.inner_text()).strip().lower()
+                    # Avoid clicking "Message" or "Follow" buttons
+                    if "connect" in btn_text:
+                        await role_btn.click()
+                        connect_clicked = True
+
+            # Strategy 3: Try the "More" overflow menu
+            if not connect_clicked:
                 more_btn = scope.locator(
                     "button[aria-label='More actions'], button[aria-label='More']"
                 ).first
+                if await more_btn.count() == 0:
+                    more_btn = scope.get_by_role(
+                        "button", name=re.compile(r"more", re.IGNORECASE)
+                    ).first
+
                 if await more_btn.count() > 0:
                     await more_btn.click()
                     try:
@@ -201,89 +263,154 @@ async def send_connection_request(
                     except Exception:
                         pass
                     await page.wait_for_timeout(500)
-                    menu = page.locator("div[role='menu']").first
-                    connect_in_menu = menu.locator("text=Connect").first
-                    if await connect_in_menu.count() > 0:
-                        await connect_in_menu.click()
-                    else:
-                        # Only Follow/Message available → already connected or not connectable
-                        has_message = await scope.locator(
-                            "button[aria-label*='Message']"
-                        ).count() > 0
-                        reason = "already_connected" if has_message else "button_not_found"
-                        print(f"Connect not available ({reason}): {profile_url}")
-                        result = {"ok": False, "reason": reason}
-                        await context.browser.close()
-                        return result
-                else:
-                    has_message = await scope.locator(
-                        "button[aria-label*='Message']"
-                    ).count() > 0
-                    reason = "already_connected" if has_message else "button_not_found"
-                    print(f"Connect not available ({reason}): {profile_url}")
-                    result = {"ok": False, "reason": reason}
-                    await context.browser.close()
-                    return result
-            else:
-                await direct_connect.click()
 
-            # Wait for invite modal
+                    menu = page.locator("div[role='menu']").first
+                    if await menu.count() > 0:
+                        # Look for Connect in the dropdown menu
+                        connect_in_menu = menu.get_by_role(
+                            "menuitem", name=re.compile(r"connect", re.IGNORECASE)
+                        ).first
+                        if await connect_in_menu.count() == 0:
+                            connect_in_menu = menu.locator(
+                                "span:has-text('Connect'), div:has-text('Connect')"
+                            ).first
+
+                        if await connect_in_menu.count() > 0:
+                            await connect_in_menu.click()
+                            connect_clicked = True
+                        else:
+                            # Close the menu by pressing Escape
+                            await page.keyboard.press("Escape")
+                            await page.wait_for_timeout(300)
+
+            if not connect_clicked:
+                # Determine if already connected or truly not available
+                has_message = await scope.locator(
+                    "button[aria-label*='Message']"
+                ).count() > 0
+                reason = "already_connected" if has_message else "button_not_found"
+                print(f"Connect not available ({reason}): {profile_url}")
+                result = {"ok": False, "reason": reason}
+                if reason == "button_not_found":
+                    raise ActionFailedError(f"Connect button not found: {profile_url}")
+                await context.browser.close()
+                return result
+
+            # ── Wait for invite modal ────────────────────────────────────────
+            await page.wait_for_timeout(random.randint(800, 1500))
             try:
                 await page.wait_for_selector(
                     "div[role='dialog']", state="visible", timeout=8000
                 )
             except Exception:
+                # Sometimes LinkedIn sends the request directly without a modal
+                # Check if the button changed to "Pending"
+                pending_check = scope.locator("button[aria-label*='Pending']").first
+                if await pending_check.count() > 0:
+                    print(f"Connection sent (no modal): {profile_url}")
+                    result = {"ok": True, "reason": "sent"}
+                    await context.browser.close()
+                    return result
                 print("Invite modal did not appear.")
                 result = {"ok": False, "reason": "modal_missing"}
-                await context.browser.close()
-                return result
+                raise ActionFailedError(f"Invite modal did not appear: {profile_url}")
 
             dialog = page.locator("div[role='dialog']").first
 
+            # ── Add note (if provided) ───────────────────────────────────────
             if note_text:
-                add_note_btn = dialog.locator(
-                    "button[aria-label='Add a note'], button[aria-label='Add a free note']"
-                ).first
-                if await add_note_btn.count() > 0:
+                # Try multiple selectors for "Add a note" button
+                add_note_btn = None
+                add_note_selectors = [
+                    "button[aria-label='Add a note']",
+                    "button[aria-label='Add a free note']",
+                    "button:has-text('Add a note')",
+                ]
+                for sel in add_note_selectors:
+                    btn = dialog.locator(sel).first
+                    if await btn.count() > 0:
+                        add_note_btn = btn
+                        break
+
+                if not add_note_btn:
+                    add_note_btn = dialog.get_by_role(
+                        "button", name=re.compile(r"add a note", re.IGNORECASE)
+                    ).first
+
+                if add_note_btn and await add_note_btn.count() > 0:
                     await add_note_btn.click()
-                    await page.wait_for_timeout(800)
+                    await page.wait_for_timeout(random.randint(600, 1200))
+
+                    # Find the textarea
                     textarea = dialog.locator(
-                        "textarea[name='message'], textarea#custom-message"
+                        "textarea[name='message'], "
+                        "textarea#custom-message, "
+                        "textarea"
                     ).first
                     if await textarea.count() > 0:
-                        await textarea.fill(note_text[:300])
-                        await page.wait_for_timeout(800)
+                        # Type with human-like delays
+                        await textarea.click()
+                        await page.keyboard.type(
+                            note_text[:300],
+                            delay=random.randint(30, 70),
+                        )
+                        await page.wait_for_timeout(random.randint(500, 1000))
 
-            send_btn = dialog.locator(
-                "button[aria-label='Send invitation'], "
-                "button[aria-label='Send without a note'], "
-                "button[aria-label='Send now'], "
-                "button[aria-label='Send'], "
-                "button:has-text('Send')"
-            ).first
-            if await send_btn.count() == 0:
-                print("Send button not found.")
-                result = {"ok": False, "reason": "send_not_found"}
-            else:
-                await send_btn.click()
-                await page.wait_for_timeout(2000)
+            # ── Click Send ───────────────────────────────────────────────────
+            send_btn = None
+            send_selectors = [
+                "button[aria-label='Send invitation']",
+                "button[aria-label='Send without a note']",
+                "button[aria-label='Send now']",
+                "button[aria-label='Send']",
+            ]
+            for sel in send_selectors:
+                btn = dialog.locator(sel).first
+                if await btn.count() > 0:
+                    send_btn = btn
+                    break
 
-                # Weekly-limit modal?
-                limit_modal = page.locator(
-                    "div[role='dialog']:has-text('weekly'), "
-                    "div[role='dialog']:has-text('reached the weekly')"
+            # Fallback: getByRole
+            if not send_btn or await send_btn.count() == 0:
+                send_btn = dialog.get_by_role(
+                    "button", name=re.compile(r"^send", re.IGNORECASE)
                 ).first
-                if await limit_modal.count() > 0:
-                    print(f"Weekly invite limit hit: {profile_url}")
-                    result = {"ok": False, "reason": "weekly_limit"}
-                else:
-                    print(f"Connection request sent: {profile_url}")
-                    result = {"ok": True, "reason": "sent"}
+
+            # Fallback: text-based
+            if not send_btn or await send_btn.count() == 0:
+                send_btn = dialog.locator("button:has-text('Send')").first
+
+            if not send_btn or await send_btn.count() == 0:
+                print("Send button not found in modal.")
+                result = {"ok": False, "reason": "send_not_found"}
+                raise ActionFailedError(f"Send button not found: {profile_url}")
+
+            await send_btn.click()
+            await page.wait_for_timeout(random.randint(2000, 3500))
+
+            # ── Check for weekly limit modal ─────────────────────────────────
+            limit_modal = page.locator(
+                "div[role='dialog']:has-text('weekly'), "
+                "div[role='dialog']:has-text('reached the weekly'), "
+                "div[role='dialog']:has-text('invitation limit')"
+            ).first
+            if await limit_modal.count() > 0:
+                print(f"Weekly invite limit hit: {profile_url}")
+                result = {"ok": False, "reason": "weekly_limit"}
+                raise ActionFailedError("Weekly connection request limit reached")
+            else:
+                print(f"Connection request sent: {profile_url}")
+                result = {"ok": True, "reason": "sent"}
+
+        except ActionFailedError:
+            await page.wait_for_timeout(random.randint(1000, 2000))
+            await context.browser.close()
+            raise
         except Exception as e:
             print(f"Failed to connect: {e}")
             result = {"ok": False, "reason": f"exception:{e}"}
 
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(random.randint(1000, 2000))
         await context.browser.close()
         return result
 
@@ -297,13 +424,19 @@ async def repost_post(post_url: str, headless: bool = True) -> dict:
 
         result = {"ok": False, "reason": "unknown"}
         try:
-            await page.goto(post_url)
+            await safe_sleep(1.0, 3.0)
+            await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(3000)
 
             scope = await _find_post_container(page, post_url)
             repost_btn = scope.locator(
                 "button[aria-label*='Repost'], button[aria-label*='repost']"
             ).first
+            if await repost_btn.count() == 0:
+                repost_btn = scope.get_by_role(
+                    "button", name=re.compile(r"repost", re.IGNORECASE)
+                ).first
+
             if await repost_btn.count() == 0:
                 print("Repost button not found.")
                 result = {"ok": False, "reason": "button_not_found"}
@@ -337,6 +470,6 @@ async def repost_post(post_url: str, headless: bool = True) -> dict:
             print(f"Failed to repost: {e}")
             result = {"ok": False, "reason": f"exception:{e}"}
 
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(random.randint(1000, 2000))
         await context.browser.close()
         return result

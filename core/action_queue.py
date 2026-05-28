@@ -99,6 +99,15 @@ async def process_one_action() -> dict:
             await asyncio.sleep(random.uniform(1, 3))
         else:
             await _dispatch_action(action_type, payload, health)
+            if action_type == "connect":
+                await db.connections.update_one(
+                    {"linkedin_url": payload["target_profile_url"]},
+                    {"$set": {
+                        "status": "request_sent",
+                        "first_contacted_at": datetime.utcnow(),
+                        "last_action_at": datetime.utcnow(),
+                    }}
+                )
 
         if budget_key:
             await BudgetManager.increment_budget(budget_key)
@@ -120,32 +129,41 @@ async def _dispatch_action(action_type: str, payload: dict, health: str):
     await safe_sleep()
 
     if action_type == "view_profile":
-        page, context = await get_browser_page(headless=True)
+        page, context, p_instance = await get_browser_page(headless=True)
         try:
             await page.goto(payload["target_profile_url"])
             await page.wait_for_timeout(random.randint(3000, 7000))
         finally:
             await context.browser.close()
+            await p_instance.stop()
 
     elif action_type == "connect":
-        await send_connection_request(
+        res = await send_connection_request(
             profile_url=payload["target_profile_url"],
             note_text=payload.get("message"),
             headless=True,
         )
+        if not res.get("ok"):
+            raise Exception(f"Action failed: {res.get('reason')}")
 
     elif action_type == "like":
-        await react_to_post(post_url=payload["post_url"], headless=True)
+        res = await react_to_post(post_url=payload["post_url"], headless=True)
+        if not res.get("ok"):
+            raise Exception(f"Action failed: {res.get('reason')}")
 
     elif action_type == "comment":
-        await comment_on_post(
+        res = await comment_on_post(
             post_url=payload["post_url"],
             comment_text=payload["message"],
             headless=True,
         )
+        if not res.get("ok"):
+            raise Exception(f"Action failed: {res.get('reason')}")
 
     elif action_type == "repost":
-        await repost_post(post_url=payload["post_url"], headless=True)
+        res = await repost_post(post_url=payload["post_url"], headless=True)
+        if not res.get("ok"):
+            raise Exception(f"Action failed: {res.get('reason')}")
 
     # Post-action delay (doubled on yellow)
     delay = random.uniform(1, 4)

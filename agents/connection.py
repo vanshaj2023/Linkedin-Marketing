@@ -84,8 +84,7 @@ async def connection_agent_run(ctx: inngest.Context, step: inngest.Step) -> dict
         await db.connections.update_one(
             {"linkedin_url": profile["linkedin_url"]},
             {"$set": {
-                "status": "request_sent",
-                "first_contacted_at": datetime.datetime.utcnow(),
+                "status": "queued",
                 "last_action_at": datetime.datetime.utcnow(),
             }},
         )
