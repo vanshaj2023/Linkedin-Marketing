@@ -5,11 +5,34 @@ from inngest_client import inngest_client
 from db import db
 from core.action_queue import ActionQueue
 from core.circuit_breaker import CircuitBreaker
-from scrapers.people import search_company_employees
-from llm.service import score_connection_profile, generate_connection_note
-from mailer.email import send_referral_email
-from slack.bot import send_referral_alert, send_alert
+from scrapers.people import search_people
+from llm.service import generate_connection_note, generate_referral_message
+from slack.bot import send_referral_alert, send_referral_approval
+from agents.connection import _check_if_connected
 from config import config
+
+AUTO_SEND_WINDOW_DAYS = 2
+APPROVAL_TIMEOUT_DAYS = 3
+
+# Priority tiers: lower number = sent to LinkedIn first.
+# Each tier maps a label to the role keywords that go into people-search.
+TIERS = [
+    (1, "hr", [
+        "HR", "Recruiter", "Talent Acquisition", "Technical Recruiter",
+        "Talent Partner", "People Operations",
+    ]),
+    (2, "hiring_manager", [
+        "Engineering Manager", "Director of Engineering",
+        "Head of Engineering", "VP Engineering",
+    ]),
+    (3, "ic", [
+        "Software Engineer", "Senior Software Engineer",
+        "Staff Engineer", "Backend Engineer",
+    ]),
+]
+
+MAX_PER_KEYWORD = 8
+MAX_TOTAL_PER_CAMPAIGN = 30
 
 
 @inngest_client.create_function(
@@ -18,26 +41,61 @@ from config import config
     retries=1,
 )
 async def referral_campaign_start(ctx: inngest.Context, step: inngest.Step) -> dict:
-    """Discover employees, score, split into 3 batches over 5-7 days."""
-    company = ctx.event.data.get("company", "")
-    target_role = ctx.event.data.get("target_role", "Software Engineer")
-    job_post_url = ctx.event.data.get("job_post_url", "")
-    campaign_id = str(uuid.uuid4())[:8]
+    """One-shot referral flow:
+    company name in -> search company employees by role tier -> queue connect
+    requests. HR / recruiters go out first, then hiring managers, then ICs.
+    """
+    company = (ctx.event.data.get("company") or "").strip()
+    if not company:
+        return {"status": "skipped", "reason": "no_company"}
 
     health = await step.run("check-cb", CircuitBreaker.status)
     if health == "red":
         return {"status": "skipped", "reason": "circuit_breaker_red"}
 
-    raw = await step.run("discover", search_company_employees, company, 50)
+    campaign_id = str(uuid.uuid4())[:8]
+    job_post_url = ctx.event.data.get("job_post_url", "")
+    target_role = ctx.event.data.get("target_role", "Software Engineer")
 
-    scored = []
-    for p in raw:
-        score = score_connection_profile(p["headline"], p["company"], p.get("mutual_connections", 0))
-        scored.append({**p, "score": score})
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    top = scored[:45]
+    # ── Discover candidates, tier by tier ────────────────────────────────────
+    seen_urls: set[str] = set()
+    candidates: list[dict] = []
 
-    campaign_doc = {
+    for priority, tier_label, keywords in TIERS:
+        for kw in keywords:
+            if len(candidates) >= MAX_TOTAL_PER_CAMPAIGN:
+                break
+
+            results = await step.run(
+                f"search-{tier_label}-{kw.replace(' ', '_')}",
+                search_people, f"{kw} {company}", MAX_PER_KEYWORD,
+            )
+
+            for p in results:
+                url = p.get("linkedin_url", "")
+                if not url or url in seen_urls:
+                    continue
+                # Cheap company-match filter: company name appears anywhere in
+                # the company / headline (LinkedIn people-search returns roles
+                # at OTHER companies too).
+                blob = f"{p.get('company', '')} {p.get('headline', '')}".lower()
+                if company.lower() not in blob:
+                    continue
+                seen_urls.add(url)
+                candidates.append({
+                    **p,
+                    "priority": priority,
+                    "tier": tier_label,
+                })
+                if len(candidates) >= MAX_TOTAL_PER_CAMPAIGN:
+                    break
+
+    if not candidates:
+        return {"status": "done", "campaign_id": campaign_id, "queued": 0,
+                "reason": "no_candidates"}
+
+    # ── Persist campaign ─────────────────────────────────────────────────────
+    await db.referral_campaigns.insert_one({
         "campaign_id": campaign_id,
         "company": company,
         "target_role": target_role,
@@ -45,105 +103,213 @@ async def referral_campaign_start(ctx: inngest.Context, step: inngest.Step) -> d
         "status": "active",
         "created_at": datetime.datetime.utcnow(),
         "targets": [
-            {**t, "batch": (i // 15) + 1, "connection_status": "pending",
-             "posts_liked": 0, "referral_email_sent": False,
-             "referral_email_sent_at": None, "response_received": False, "notes": None}
-            for i, t in enumerate(top)
+            {
+                "linkedin_url": c["linkedin_url"],
+                "name": c["name"],
+                "headline": c.get("headline", ""),
+                "tier": c["tier"],
+                "priority": c["priority"],
+                "connection_status": "pending",
+            }
+            for c in candidates
         ],
-    }
-    await db.referral_campaigns.insert_one(campaign_doc)
+    })
 
-    batch1 = top[:15]
-    slack_candidates = [
-        {**t, "headline": t.get("headline", ""),
-         "connection_note": generate_connection_note(t["headline"], t.get("company", ""), "A")}
-        for t in batch1
+    # ── Queue connect requests (priority preserved via ActionQueue) ──────────
+    queued = await step.run(
+        "queue-connects", _queue_connects, candidates, campaign_id, company,
+    )
+
+    # ── Slack heads-up: top 10 to make decisions visible ─────────────────────
+    preview = [
+        {
+            "name": c["name"],
+            "headline": c.get("headline", ""),
+            "linkedin_url": c["linkedin_url"],
+            "connection_note": generate_connection_note(
+                c.get("headline", ""), c.get("company", company), "A",
+            ),
+        }
+        for c in candidates[:10]
     ]
-    await send_referral_alert(company, slack_candidates)
+    await step.run("slack-alert", send_referral_alert, company, preview)
 
-    await step.run("batch-1", _queue_batch, batch1, 1, campaign_id, company)
-    await step.sleep("wait-batch-2", datetime.timedelta(days=2))
-    await step.run("batch-2", _queue_batch, top[15:30], 2, campaign_id, company)
-    await step.sleep("wait-batch-3", datetime.timedelta(days=2))
-    await step.run("batch-3", _queue_batch, top[30:45], 3, campaign_id, company)
+    return {
+        "status": "done",
+        "campaign_id": campaign_id,
+        "queued": queued,
+        "company": company,
+        "by_tier": {
+            label: sum(1 for c in candidates if c["tier"] == label)
+            for _, label, _ in TIERS
+        },
+        "dry_run": config.DRY_RUN,
+    }
 
-    return {"status": "done", "campaign_id": campaign_id, "targets": len(top), "dry_run": config.DRY_RUN}
 
+async def _queue_connects(
+    candidates: list, campaign_id: str, company: str,
+) -> int:
+    target_role = ""
+    campaign = await db.referral_campaigns.find_one({"campaign_id": campaign_id})
+    if campaign:
+        target_role = campaign.get("target_role", "")
 
-async def _queue_batch(targets: list, batch_num: int, campaign_id: str, company: str) -> dict:
     queued = 0
-    for t in targets:
-        note = generate_connection_note(t["headline"], t.get("company", ""), "A")
-
+    for c in candidates:
+        note = generate_connection_note(
+            c.get("headline", ""), c.get("company", company), "A",
+        )
+        # Pre-compute the referral DM now so:
+        #  1. Slack approval shows the EXACT message that'll be sent.
+        #  2. LLM cost is paid once per target, not on every poller pass.
+        proposed = generate_referral_message(
+            to_name=c["name"], to_headline=c.get("headline", ""),
+            company=company, target_role=target_role,
+        )
         await ActionQueue.push(
             "referral", "view_profile",
-            {"target_profile_url": t["linkedin_url"]},
-            priority=1, is_dry_run=config.DRY_RUN,
+            {"target_profile_url": c["linkedin_url"]},
+            priority=c["priority"], is_dry_run=config.DRY_RUN,
         )
         await ActionQueue.push(
             "referral", "connect",
-            {"target_profile_url": t["linkedin_url"], "message": note},
-            priority=1, is_dry_run=config.DRY_RUN,
+            {"target_profile_url": c["linkedin_url"], "message": note},
+            priority=c["priority"], is_dry_run=config.DRY_RUN,
         )
-
-        await db.engage_list.update_one(
-            {"linkedin_url": t["linkedin_url"]},
-            {"$setOnInsert": {
-                "linkedin_url": t["linkedin_url"],
-                "name": t["name"],
-                "reason": "referral_target",
-                "last_post_url": None,
-                "last_engaged_at": None,
-                "engagement_count": 0,
-                "auto_comment": True,
-                "added_by_agent": f"referral:{campaign_id}",
-            }},
-            upsert=True,
-        )
-
         await db.referral_campaigns.update_one(
-            {"campaign_id": campaign_id, "targets.linkedin_url": t["linkedin_url"]},
-            {"$set": {"targets.$.connection_status": "sent"}},
+            {"campaign_id": campaign_id, "targets.linkedin_url": c["linkedin_url"]},
+            {"$set": {
+                "targets.$.connection_status": "queued",
+                "targets.$.proposed_referral_msg": proposed,
+            }},
         )
         queued += 1
+    return queued
 
-    return {"batch": batch_num, "queued": queued}
 
+# ── Acceptance poller ────────────────────────────────────────────────────────
 
 @inngest_client.create_function(
-    fn_id="referral-on-connection-accepted",
-    trigger=inngest.TriggerEvent(event="connection/accepted"),
+    fn_id="referral-acceptance-poller",
+    trigger=inngest.TriggerCron(cron="0 */4 * * *"),
     retries=1,
 )
-async def referral_on_connection_accepted(ctx: inngest.Context, step: inngest.Step) -> dict:
-    """On connection accepted: wait 3 days, then send referral email."""
-    linkedin_url = ctx.event.data.get("linkedin_url", "")
-    name = ctx.event.data.get("name", "")
+async def referral_acceptance_poller(ctx: inngest.Context, step: inngest.Step) -> dict:
+    """Every 4h: walk active referral targets, decide what to do.
 
-    campaign = await db.referral_campaigns.find_one(
-        {"status": "active", "targets.linkedin_url": linkedin_url}
+      - Not-yet-accepted + connect was sent → check if they accepted.
+        - Accepted within AUTO_SEND_WINDOW_DAYS → queue DM automatically.
+        - Accepted later → post Slack approval, mark awaiting_approval.
+      - Awaiting approval for > APPROVAL_TIMEOUT_DAYS → auto-skip.
+    """
+    health = await step.run("check-cb", CircuitBreaker.status)
+    if health == "red":
+        return {"status": "skipped", "reason": "circuit_breaker_red"}
+
+    now = datetime.datetime.utcnow()
+    checked = auto_sent = awaiting = timed_out = 0
+
+    # 1. Time out stale awaiting_approval rows
+    timeout_cutoff = now - datetime.timedelta(days=APPROVAL_TIMEOUT_DAYS)
+    timeout_res = await db.referral_campaigns.update_many(
+        {"targets": {"$elemMatch": {
+            "referral_msg_status": "awaiting_approval",
+            "referral_msg_decided_at": {"$lt": timeout_cutoff},
+        }}},
+        {"$set": {
+            "targets.$[t].referral_msg_status": "skipped",
+        }},
+        array_filters=[{
+            "t.referral_msg_status": "awaiting_approval",
+            "t.referral_msg_decided_at": {"$lt": timeout_cutoff},
+        }],
     )
-    if not campaign:
-        return {"status": "not_in_campaign"}
+    timed_out = timeout_res.modified_count
 
-    target_role = campaign.get("target_role", "Software Engineer")
-    company = campaign.get("company", "")
+    # 2. Walk active campaigns, look at queued+sent-but-undecided targets
+    campaigns = await db.referral_campaigns.find({"status": "active"}).to_list(length=200)
+    for camp in campaigns:
+        company = camp.get("company", "")
+        for t in camp.get("targets", []):
+            if t.get("referral_msg_status") != "pending":
+                continue
+            if t.get("connection_status") not in ("queued", "accepted"):
+                continue
+            sent_at = t.get("request_sent_at")
+            if not sent_at:
+                # Connect action hasn't run yet (still in the queue).
+                continue
 
-    await step.sleep("wait-3d", datetime.timedelta(days=3))
+            url = t["linkedin_url"]
+            checked += 1
 
-    email_sent = await step.run(
-        "send-email", send_referral_email, "", name, company, target_role,
-    )
+            # Re-use the existing acceptance check helper.
+            is_accepted = await step.run(
+                f"check-{camp['campaign_id']}-{url[-30:]}",
+                _check_if_connected, url,
+            )
+            if not is_accepted:
+                continue
 
-    if email_sent:
-        await db.referral_campaigns.update_one(
-            {"_id": campaign["_id"], "targets.linkedin_url": linkedin_url},
-            {"$set": {
-                "targets.$.connection_status": "accepted",
-                "targets.$.referral_email_sent": True,
-                "targets.$.referral_email_sent_at": datetime.datetime.utcnow(),
-            }},
-        )
-        await send_alert(f"Referral email queued for {name} @ {company} ({target_role}). DRY_RUN={config.DRY_RUN}")
+            days_since = (now - sent_at).total_seconds() / 86400.0
+            proposed_msg = t.get("proposed_referral_msg") or generate_referral_message(
+                to_name=t["name"], to_headline=t.get("headline", ""),
+                company=company, target_role=camp.get("target_role", ""),
+            )
 
-    return {"status": "done", "email_sent": email_sent, "name": name}
+            if days_since <= AUTO_SEND_WINDOW_DAYS:
+                # Auto-send: queue a DM. Action-queue dispatcher flips
+                # referral_msg_status to "auto_sent" on success.
+                await ActionQueue.push(
+                    "referral", "dm",
+                    {
+                        "target_profile_url": url,
+                        "message": proposed_msg,
+                        "auto": True,
+                    },
+                    priority=t.get("priority", 3),
+                    is_dry_run=config.DRY_RUN,
+                )
+                await db.referral_campaigns.update_one(
+                    {"campaign_id": camp["campaign_id"], "targets.linkedin_url": url},
+                    {"$set": {
+                        "targets.$.connection_status": "accepted",
+                        "targets.$.accepted_at": now,
+                        "targets.$.referral_msg_decided_at": now,
+                    }},
+                )
+                auto_sent += 1
+            else:
+                # Out of window — ask in Slack.
+                ts = await send_referral_approval(
+                    target={
+                        "name": t["name"],
+                        "headline": t.get("headline", ""),
+                        "linkedin_url": url,
+                        "tier": t.get("tier", "ic"),
+                    },
+                    company=company,
+                    days_since_request=days_since,
+                    proposed_msg=proposed_msg,
+                )
+                await db.referral_campaigns.update_one(
+                    {"campaign_id": camp["campaign_id"], "targets.linkedin_url": url},
+                    {"$set": {
+                        "targets.$.connection_status": "accepted",
+                        "targets.$.accepted_at": now,
+                        "targets.$.referral_msg_status": "awaiting_approval",
+                        "targets.$.referral_msg_decided_at": now,
+                        "targets.$.slack_approval_ts": ts,
+                        "targets.$.proposed_referral_msg": proposed_msg,
+                    }},
+                )
+                awaiting += 1
+
+    return {
+        "status": "done",
+        "checked": checked,
+        "auto_sent": auto_sent,
+        "awaiting_approval": awaiting,
+        "timed_out": timed_out,
+    }

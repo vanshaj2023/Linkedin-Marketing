@@ -4,7 +4,17 @@
       "Bash(mkdir:*)",
       "Bash(python -c ':*)",
       "Bash(ls -la *.md)",
-      "Bash(./venv/Scripts/python.exe -c \"import scrapers.feed, browser.interactions; print\\('ok'\\)\")"
+      "Bash(./venv/Scripts/python.exe -c \"import scrapers.feed, browser.interactions; print\\('ok'\\)\")",
+      "Bash(dir C:\\\\Users\\\\kumar\\\\Desktop\\\\VS Code\\\\linkedin\\\\scrapers *)",
+      "Bash(dir C:\\\\Users\\\\kumar\\\\Desktop\\\\VS Code\\\\linkedin\\\\browser *)",
+      "WebSearch",
+      "WebFetch(domain:iron-mind.ai)",
+      "WebFetch(domain:alterlab.io)",
+      "WebFetch(domain:scrapfly.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:dev.to)",
+      "Bash(./venv/Scripts/python.exe debug_urn_in_html.py)",
+      "Bash(venv/Scripts/python.exe *)"
     ]
   }
 }

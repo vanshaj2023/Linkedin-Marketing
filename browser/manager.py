@@ -19,18 +19,36 @@ CONSISTENT_VIEWPORT = {"width": 1366, "height": 768}
 
 
 async def get_authenticated_context(p: Playwright, headless: bool = True) -> BrowserContext:
-    """Launch browser and return a context with consistent fingerprint + saved session."""
+    """Launch browser and return a context with consistent fingerprint + saved session.
+
+    Env overrides:
+      LINKEDIN_HEADED=1 — force headed mode regardless of `headless` argument
+        (LinkedIn often serves stripped feeds to headless browsers)
+    """
+    if os.getenv("LINKEDIN_HEADED") == "1":
+        headless = False
+
     proxy_url = os.getenv("PROXY_URL")
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    # Chrome's "new" headless mode runs the real Chrome renderer instead of the
+    # stripped headless-shell — much harder for LinkedIn to detect.
+    if headless:
+        args.append("--headless=new")
+
+    # Always launch via the full Chromium binary (headless=False at the Playwright
+    # level). When --headless=new is in args, Chromium renders invisibly using the
+    # real (non-shell) engine — looks identical to a headed browser from LinkedIn's
+    # perspective. When --headless=new is absent, you get a visible window.
     launch_options: dict = {
-        "headless": headless,
-        "args": [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
+        "headless": False,
+        "args": args,
     }
     if proxy_url:
         launch_options["proxy"] = {"server": proxy_url}

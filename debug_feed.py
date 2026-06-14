@@ -12,13 +12,8 @@ async def debug():
         await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(5000)
 
-        vp = page.viewport_size or {"width": 1280, "height": 720}
-        feed_x = vp["width"] * 0.38
-        feed_y = vp["height"] * 0.5
-        await page.mouse.click(feed_x, feed_y)
-        await page.wait_for_timeout(800)
         for _ in range(8):
-            await page.mouse.wheel(0, 900)
+            await page.evaluate("window.scrollBy(0, 900)")
             await page.wait_for_timeout(1500)
 
         # Find ALL elements that contain an activity link and print their tag + classes

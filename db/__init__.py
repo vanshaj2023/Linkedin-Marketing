@@ -38,6 +38,8 @@ class DailyBudgets(BaseModel):
     comments: DailyBudgetLimit = DailyBudgetLimit(limit=10)
     reposts: DailyBudgetLimit = DailyBudgetLimit(limit=3)
     searches: DailyBudgetLimit = DailyBudgetLimit(limit=30)
+    applications: DailyBudgetLimit = DailyBudgetLimit(limit=10)
+    messages: DailyBudgetLimit = DailyBudgetLimit(limit=15)
 
 
 class SystemHealth(BaseModel):
@@ -68,6 +70,7 @@ class Job(BaseModel):
     job_title: str
     company: str
     poster_name: str
+    poster_url: Optional[str] = None
     relevance_score: Optional[int] = None
     action_taken: str = "none"
     comment_text: Optional[str] = None
@@ -91,14 +94,18 @@ class EngageListMember(BaseModel):
 class ReferralTarget(BaseModel):
     linkedin_url: str
     name: str
-    role: str
-    score: int
-    batch: int
-    connection_status: str = "pending"
-    posts_liked: int = 0
-    referral_email_sent: bool = False
-    referral_email_sent_at: Optional[datetime] = None
-    response_received: bool = False
+    headline: str = ""
+    tier: str = "ic"
+    priority: int = 3
+    connection_status: str = "pending"   # pending | queued | accepted | declined
+    request_sent_at: Optional[datetime] = None
+    accepted_at: Optional[datetime] = None
+    # Referral DM lifecycle:
+    #   pending → auto_sent | awaiting_approval → approved | skipped
+    referral_msg_status: str = "pending"
+    referral_msg_decided_at: Optional[datetime] = None
+    proposed_referral_msg: Optional[str] = None
+    slack_approval_ts: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -135,3 +142,6 @@ async def setup_indexes():
     await db.engage_list.create_index("linkedin_url", unique=True)
     await db.referral_campaigns.create_index("campaign_id", unique=True)
     await db.reputation_scores.create_index("linkedin_url", unique=True)
+    await db.feed_job_posts.create_index("post_id", unique=True)
+    await db.recent_jobs.create_index("linkedin_post_url", unique=True)
+    await db.easy_apply_logs.create_index([("job_url", 1), ("attempted_at", -1)])

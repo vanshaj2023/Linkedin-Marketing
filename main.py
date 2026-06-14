@@ -30,7 +30,9 @@ from core.action_queue import inngest_queue_processor, inngest_budget_reset
 from agents.connection import connection_agent_run, connection_acceptance_poller
 from agents.content import content_agent_reposts, content_agent_reactions
 from agents.job_hunter import job_hunter_run
-from agents.referral import referral_campaign_start, referral_on_connection_accepted
+from agents.referral import referral_campaign_start, referral_acceptance_poller
+from agents.feed_scout import feed_scout_run
+from agents.auto_apply import auto_apply_run
 
 ALL_FUNCTIONS = [
     inngest_queue_processor,
@@ -41,7 +43,9 @@ ALL_FUNCTIONS = [
     content_agent_reactions,
     job_hunter_run,
     referral_campaign_start,
-    referral_on_connection_accepted,
+    referral_acceptance_poller,
+    feed_scout_run,
+    auto_apply_run,
 ]
 
 
@@ -134,6 +138,10 @@ async def slack_actions(request: Request):
                 {"linkedin_post_url": value},
                 {"$set": {"applied": True, "applied_at": dt.datetime.utcnow()}},
             )
+            await db.recent_jobs.update_one(
+                {"linkedin_post_url": value},
+                {"$set": {"status": "applied", "applied_at": dt.datetime.utcnow()}},
+            )
         elif action_id == "trigger_referral":
             await handle_referral_command(value)
         elif action_id == "repost_now":
@@ -141,6 +149,62 @@ async def slack_actions(request: Request):
             await ActionQueue.push(
                 "content", "repost", {"post_url": value},
                 priority=3, is_dry_run=config.DRY_RUN,
+            )
+        elif action_id == "connect_poster":
+            from core.action_queue import ActionQueue
+            from llm.service import generate_connection_note
+            parts = value.split("::", 1)
+            poster_url = parts[0]
+            note_seed = parts[1] if len(parts) > 1 else ""
+            if poster_url:
+                note = generate_connection_note(
+                    headline=note_seed, post_summary=note_seed, template_id="A"
+                )
+                await ActionQueue.push(
+                    "feed_scout", "connect",
+                    {"target_profile_url": poster_url, "message": note},
+                    priority=2, is_dry_run=config.DRY_RUN,
+                )
+        elif action_id == "approve_referral_dm":
+            from db import db
+            import datetime as dt
+            from core.action_queue import ActionQueue
+            camp = await db.referral_campaigns.find_one(
+                {"targets.linkedin_url": value},
+                {"company": 1, "targets.$": 1},
+            )
+            if camp and camp.get("targets"):
+                t = camp["targets"][0]
+                msg = t.get("proposed_referral_msg") or ""
+                if msg:
+                    await ActionQueue.push(
+                        "referral", "dm",
+                        {"target_profile_url": value, "message": msg, "auto": False},
+                        priority=t.get("priority", 3),
+                        is_dry_run=config.DRY_RUN,
+                    )
+                    await db.referral_campaigns.update_one(
+                        {"targets.linkedin_url": value},
+                        {"$set": {
+                            "targets.$.referral_msg_status": "approved",
+                            "targets.$.referral_msg_decided_at": dt.datetime.utcnow(),
+                        }},
+                    )
+        elif action_id == "skip_referral_dm":
+            from db import db
+            import datetime as dt
+            await db.referral_campaigns.update_one(
+                {"targets.linkedin_url": value},
+                {"$set": {
+                    "targets.$.referral_msg_status": "skipped",
+                    "targets.$.referral_msg_decided_at": dt.datetime.utcnow(),
+                }},
+            )
+        elif action_id == "dismiss_feed_job":
+            from db import db
+            await db.feed_job_posts.update_one(
+                {"post_id": value},
+                {"$set": {"status": "dismissed"}},
             )
 
     return Response(status_code=200)

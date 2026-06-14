@@ -71,6 +71,123 @@ def score_post_for_repost(author_name: str, content: str, likes: int, comments: 
         return {"score": 0, "reasoning": "parse error", "suggested_caption": ""}
 
 
+def classify_feed_post_as_job(content: str, author_name: str) -> dict:
+    """Classify whether a feed post is a hiring/job/referral signal.
+
+    Returns JSON with keys: is_job_post, role, company, apply_method,
+    apply_target, relevance_score (0-100), reasoning.
+    apply_method: "comment" | "dm" | "link" | "email" | "unknown"
+    """
+    result = _chat([
+        {
+            "role": "system",
+            "content": (
+                "You analyze LinkedIn posts to detect job/hiring signals for a software engineer. "
+                f"The engineer specializes in: {config.YOUR_DOMAIN}. "
+                "Return JSON with these exact keys: "
+                "is_job_post (bool), "
+                "role (string or null — job title if mentioned), "
+                "company (string or null), "
+                "apply_method (one of: comment, dm, link, email, unknown), "
+                "apply_target (string or null — the URL/email/instruction to apply), "
+                "relevance_score (int 0-100 — how relevant is this role to the engineer), "
+                "reasoning (string — 1 sentence why)."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Author: {author_name}\n\nPost:\n{content[:800]}",
+        },
+    ], json_mode=True)
+    try:
+        data = json.loads(result)
+        return {
+            "is_job_post": bool(data.get("is_job_post", False)),
+            "role": data.get("role"),
+            "company": data.get("company"),
+            "apply_method": data.get("apply_method", "unknown"),
+            "apply_target": data.get("apply_target"),
+            "relevance_score": int(data.get("relevance_score", 0)),
+            "reasoning": data.get("reasoning", ""),
+        }
+    except Exception:
+        return {
+            "is_job_post": False, "role": None, "company": None,
+            "apply_method": "unknown", "apply_target": None,
+            "relevance_score": 0, "reasoning": "parse error",
+        }
+
+
+def answer_application_question(
+    question: str,
+    field_type: str,
+    options: list[str] | None = None,
+    context: dict | None = None,
+) -> str:
+    """Answer a job application form field using applicant profile context.
+
+    field_type: "text" | "number" | "yes_no" | "single_select" | "multi_select"
+    For select types, the returned value must exactly match one of options.
+    """
+    ctx = context or {}
+    profile_block = (
+        f"Applicant profile:\n"
+        f"- Name: {config.YOUR_NAME}\n"
+        f"- Role: {ctx.get('current_role', config.YOUR_DOMAIN)}\n"
+        f"- Years experience: {ctx.get('years_experience', 2)}\n"
+        f"- Requires sponsorship: {ctx.get('requires_sponsorship', 'No')}\n"
+        f"- Willing to relocate: {ctx.get('willing_to_relocate', 'No')}\n"
+        f"- Salary expectation: {ctx.get('salary_expectation', 'Negotiable')}\n"
+        f"- LinkedIn: {ctx.get('linkedin_url', '')}\n"
+        f"- GitHub: {ctx.get('github_url', '')}\n"
+    )
+    options_block = f"\nAllowed values (pick exactly one): {options}" if options else ""
+    result = _chat([
+        {
+            "role": "system",
+            "content": (
+                "You fill job application forms accurately and concisely on behalf of an applicant. "
+                "Return ONLY the answer — no explanation, no quotes, no extra text. "
+                "For yes/no or select questions, return exactly one of the allowed values."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"{profile_block}\n\nQuestion: {question}\nField type: {field_type}{options_block}",
+        },
+    ])
+    return result.strip()
+
+
+def generate_referral_message(
+    to_name: str, to_headline: str, company: str, target_role: str = "",
+) -> str:
+    """Generate a polite LinkedIn DM asking for a referral. <=600 chars."""
+    role_line = (
+        f"There's a {target_role} role open at {company} that I'd love to be considered for."
+        if target_role
+        else f"I'm interested in opportunities at {company} that fit my background."
+    )
+    result = _chat([
+        {"role": "system", "content": (
+            "You write short, polite LinkedIn DMs that ask for a referral. "
+            "Constraints: <=600 characters, conversational, no hashtags, no salesy phrasing. "
+            "Open by thanking them for connecting, mention you saw their work, ask if they'd "
+            "be open to a referral, give them an easy out. Sign off with the sender's first name only. "
+            "Return ONLY the message text."
+        )},
+        {"role": "user", "content": (
+            f"Recipient name: {to_name}\n"
+            f"Recipient headline: {to_headline}\n"
+            f"Target company: {company}\n"
+            f"{role_line}\n"
+            f"Sender domain: {config.YOUR_DOMAIN}\n"
+            f"Sender name: {config.YOUR_NAME or 'me'}"
+        )},
+    ])
+    return result.strip()[:600]
+
+
 def generate_engage_comment(author_name: str, post_content: str) -> str:
     """Generate a short, genuine comment for engagement."""
     result = _chat([

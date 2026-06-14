@@ -8,6 +8,8 @@ class Config:
     # --- LLM ---
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_VISION_MODEL: str = os.getenv("OPENAI_VISION_MODEL", "gpt-4o")
 
     # --- Slack ---
     SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
@@ -52,6 +54,19 @@ class Config:
     YOUR_DOMAIN: str = os.getenv("YOUR_DOMAIN", "backend engineering")
     YOUR_NAME: str = os.getenv("YOUR_NAME", "")
     YOUR_EMAIL: str = os.getenv("YOUR_EMAIL", "")
+
+    # --- Applicant details for Easy Apply forms ---
+    APPLICANT_PROFILE: dict = {
+        "phone": os.getenv("APPLICANT_PHONE", ""),
+        "years_experience": int(os.getenv("APPLICANT_YOE", "2")),
+        "current_role": os.getenv("APPLICANT_ROLE", ""),
+        "resume_path": os.getenv("APPLICANT_RESUME_PATH", "./resume.pdf"),
+        "linkedin_url": os.getenv("APPLICANT_LINKEDIN_URL", ""),
+        "github_url": os.getenv("APPLICANT_GITHUB_URL", ""),
+        "salary_expectation": os.getenv("APPLICANT_SALARY", "Negotiable"),
+        "willing_to_relocate": os.getenv("APPLICANT_RELOCATE", "false"),
+        "requires_sponsorship": os.getenv("APPLICANT_SPONSORSHIP", "false"),
+    }
 
 
 config = Config()

@@ -59,8 +59,22 @@ async def scrape_jobs(keyword: str, location: str = "United States", max_jobs: i
                 desc_el = page.locator("#job-details, .jobs-description__content").first
                 description = (await desc_el.inner_text())[:3000] if await desc_el.count() > 0 else ""
 
-                poster_el = page.locator(".hirer-card__hirer-information span").first
-                poster = (await poster_el.inner_text()).strip() if await poster_el.count() > 0 else ""
+                poster_el = page.locator(".hirer-card__hirer-information .app-aware-link").first
+                poster = ""
+                poster_url = None
+                if await poster_el.count() > 0:
+                    poster = (await poster_el.inner_text()).strip()
+                    href = await poster_el.get_attribute("href")
+                    if href:
+                        poster_url = (
+                            "https://www.linkedin.com" + href
+                            if href.startswith("/in/")
+                            else href.split("?")[0]
+                        )
+                else:
+                    name_el = page.locator(".hirer-card__hirer-information span").first
+                    if await name_el.count() > 0:
+                        poster = (await name_el.inner_text()).strip()
 
                 if post_url:
                     results.append({
@@ -69,6 +83,7 @@ async def scrape_jobs(keyword: str, location: str = "United States", max_jobs: i
                         "linkedin_post_url": post_url,
                         "description": description,
                         "poster_name": poster,
+                        "poster_url": poster_url,
                         "poster_text": "",
                     })
             except Exception as e:

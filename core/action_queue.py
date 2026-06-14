@@ -15,6 +15,8 @@ BUDGET_MAP = {
     "view_profile": "profile_views",
     "search": "searches",
     "repost": "reposts",
+    "easy_apply": "applications",
+    "dm": "messages",
 }
 
 
@@ -100,13 +102,19 @@ async def process_one_action() -> dict:
         else:
             await _dispatch_action(action_type, payload, health)
             if action_type == "connect":
+                now = datetime.utcnow()
                 await db.connections.update_one(
                     {"linkedin_url": payload["target_profile_url"]},
                     {"$set": {
                         "status": "request_sent",
-                        "first_contacted_at": datetime.utcnow(),
-                        "last_action_at": datetime.utcnow(),
+                        "first_contacted_at": now,
+                        "last_action_at": now,
                     }}
+                )
+                # Stamp request_sent_at on any matching referral campaign target.
+                await db.referral_campaigns.update_one(
+                    {"targets.linkedin_url": payload["target_profile_url"]},
+                    {"$set": {"targets.$.request_sent_at": now}},
                 )
 
         if budget_key:
@@ -122,7 +130,7 @@ async def process_one_action() -> dict:
 
 
 async def _dispatch_action(action_type: str, payload: dict, health: str):
-    from browser.interactions import react_to_post, comment_on_post, send_connection_request, repost_post
+    from browser.interactions import react_to_post, comment_on_post, send_connection_request, repost_post, send_direct_message
     from browser.manager import safe_sleep, get_browser_page
 
     # Pre-action human delay
@@ -164,6 +172,52 @@ async def _dispatch_action(action_type: str, payload: dict, health: str):
         res = await repost_post(post_url=payload["post_url"], headless=True)
         if not res.get("ok"):
             raise Exception(f"Action failed: {res.get('reason')}")
+
+    elif action_type == "dm":
+        res = await send_direct_message(
+            profile_url=payload["target_profile_url"],
+            message_text=payload["message"],
+            headless=True,
+        )
+        if not res.get("ok"):
+            raise Exception(f"Action failed: {res.get('reason')}")
+        # Mark the DM as sent on whichever referral campaign target matches.
+        await db.referral_campaigns.update_one(
+            {"targets.linkedin_url": payload["target_profile_url"]},
+            {"$set": {
+                "targets.$.referral_msg_status": "auto_sent"
+                if payload.get("auto") else "approved",
+                "targets.$.referral_msg_decided_at": datetime.utcnow(),
+            }},
+        )
+
+    elif action_type == "easy_apply":
+        from browser.easy_apply import run_easy_apply
+        from slack.bot import send_alert, send_apply_success
+        res = await run_easy_apply(payload["url"], headless=True)
+        if res.get("ok"):
+            job_stub = {
+                "job_title": payload.get("title", ""),
+                "company": payload.get("company", ""),
+                "linkedin_post_url": payload["url"],
+            }
+            await send_apply_success(job_stub)
+            await db.recent_jobs.update_one(
+                {"linkedin_post_url": payload["url"]},
+                {"$set": {"status": "applied", "applied_at": datetime.utcnow()}},
+            )
+        else:
+            reason = res.get("reason", "unknown")
+            if reason == "needs_human":
+                await send_alert(
+                    f"Easy Apply needs human review: {payload.get('title')} @ {payload.get('company')}\n{payload['url']}",
+                    level="warn",
+                )
+            await db.recent_jobs.update_one(
+                {"linkedin_post_url": payload["url"]},
+                {"$set": {"status": "failed", "fail_reason": reason}},
+            )
+            raise Exception(f"Easy Apply failed: {reason}")
 
     # Post-action delay (doubled on yellow)
     delay = random.uniform(1, 4)

@@ -76,6 +76,7 @@ async def job_hunter_run(ctx: inngest.Context, step: inngest.Step) -> dict:
             "job_title": job["job_title"],
             "company": job["company"],
             "poster_name": job.get("poster_name", ""),
+            "poster_url": job.get("poster_url"),
             "relevance_score": relevance,
             "action_taken": action_taken,
             "comment_text": score_data.get("comment_text"),

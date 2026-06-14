@@ -1,0 +1,122 @@
+[
+  {
+    "severity": "BLOCKER",
+    "where": "run_scraper.py:39",
+    "title": "asyncio.run(main()) runs on import",
+    "detail": "Importing run_scraper triggers a full LinkedIn scrape because the call sits at module top level with no `if __name__ == '__main__':` guard. Any tool that auto-imports modules (linters, tests) launches Playwright and scrapes the feed."
+  },
+  {
+    "severity": "HIGH",
+    "where": "github_trigger.py:7 / requirements.txt",
+    "title": "github_trigger.py imports `requests` but it isn't in requirements.txt",
+    "detail": "Either add `requests>=2.31` to requirements.txt or migrate to `httpx` (already pulled in by fastapi)."
+  },
+  {
+    "severity": "BLOCKER",
+    "where": "agents/referral.py:135",
+    "title": "`send_referral_email` called with empty string for `to_email`",
+    "detail": "step.run(\"send-email\", send_referral_email, \"\", name, company, target_role) \u2014 to_email is always \"\". In DRY_RUN it silently prints success; in production the SMTP call goes to an empty address and raises (or sends to nobody). The campaign target's email is never resolved/stored anywhere."
+  },
+  {
+    "severity": "MEDIUM",
+    "where": "mailer/email.py",
+    "title": "Package `mailer.email` shadows stdlib `email`",
+    "detail": "The file does `from email.mime.text import MIMEText`, which works because absolute imports take precedence \u2014 but anywhere a relative resolver kicks in (some test runners, deps using __import__('email')) you'd get the local file instead of stdlib email. Rename to `mailer/mailer.py` or `mailer/smtp.py`."
+  },
+  {
+    "severity": "MEDIUM",
+    "where": "many files",
+    "title": "`datetime.utcnow()` deprecated in Python 3.12+; removed in 3.14",
+    "detail": "Files: ['main.py', 'agents/auto_apply.py', 'agents/connection.py', 'agents/content.py', 'agents/feed_scout.py', 'agents/job_hunter.py', 'agents/referral.py', 'browser/easy_apply.py', 'core/action_queue.py', 'core/budget.py']\u2026. Replace with `datetime.datetime.now(datetime.timezone.utc)` (or use `datetime.UTC` on 3.11+)."
+  },
+  {
+    "severity": "LOW",
+    "where": "config.py:61",
+    "title": "int(os.getenv('APPLICANT_YOE','2')) raises on empty string env var",
+    "detail": "If APPLICANT_YOE='' is in the environment (common Docker/CI footgun) the default never kicks in and int('') raises ValueError at module import time. Same risk on WARMUP_WEEK, AUTO_REPOST_THRESHOLD, CONNECTION_THRESHOLD, JOB_SLACK_THRESHOLD."
+  },
+  {
+    "severity": "LOW",
+    "where": "scrapers/feed.py:199",
+    "title": "Inner shadow import of `re` via __import__('re')",
+    "detail": "Module already does `import re` at line 1. The local `import_re = __import__('re')` inside `_extract_content` is dead/redundant \u2014 drop it."
+  },
+  {
+    "severity": "INFO",
+    "where": "db/__init__.py:9",
+    "title": "AsyncIOMotorClient instantiated at import time",
+    "detail": "Doesn't fail at import (it's lazy until first I/O), but means tools that import the package eagerly will hold an open client handle that they never close. Consider lazy-construction inside a `get_db()` helper."
+  },
+  {
+    "severity": "LOW",
+    "where": "browser/easy_apply.py:155",
+    "title": "`modal if True else None` is dead-code conditional",
+    "detail": "The expression always evaluates to `modal`. Simplify to `await _dismiss_modal(page, modal)` or remove the `True` placeholder."
+  },
+  {
+    "severity": "HIGH",
+    "where": "browser/easy_apply.py:173",
+    "title": "`modal.page` access on Playwright 1.44 \u2014 Locator has no `.page` attribute",
+    "detail": "In `_handle_resume`, `modal` is a `Locator`. Playwright Python only added the `Locator.page` property in 1.46+; requirements pin to 1.44.*. This raises AttributeError the first time a resume upload runs. Pass `page` in instead."
+  },
+  {
+    "severity": "LOW",
+    "where": "core/circuit_breaker.py:21",
+    "title": "Type hint `auto_resume_hours: int = None` mismatches default",
+    "detail": "Should be `Optional[int] = None` or `int | None = None` to satisfy strict type checkers (mypy / pyright)."
+  },
+  {
+    "severity": "LOW",
+    "where": "config.py:67-68",
+    "title": "Boolean profile fields stored as strings",
+    "detail": "willing_to_relocate / requires_sponsorship are kept as the raw env string (e.g. 'false'). Downstream llm.service.answer_application_question feeds them into a prompt as-is; that works, but you'll trip if anything compares `profile['requires_sponsorship'] is True`."
+  },
+  {
+    "severity": "HIGH",
+    "where": "scrapers/jobs.py:25",
+    "title": ".jobs-search-results-list selector is stale on new LinkedIn layout",
+    "detail": "The 2025/2026 jobs page uses `.scaffold-layout__list-container ul` instead. As coded, `await page.locator('.jobs-search-results-list').click()` throws and the next 3 PageDown presses never fire, so jobs are not scrolled into view. scrape_jobs typically returns the first ~6 cards only."
+  },
+  {
+    "severity": "HIGH",
+    "where": "scrapers/people.py:25",
+    "title": "`li.reusable-search__result-container` selector is stale",
+    "detail": "New LinkedIn people search uses `div[data-chameleon-result-urn]` (or the generic `li[componentkey]`). This selector returns 0 elements; `search_people` then returns []."
+  },
+  {
+    "severity": "MEDIUM",
+    "where": "agents/referral.py, agents/job_hunter.py, agents/connection.py",
+    "title": "Synchronous LLM/Groq calls run inside async coroutines \u2192 blocks event loop",
+    "detail": "score_connection_profile / generate_connection_note / score_job_post / score_post_for_repost / classify_feed_post_as_job / generate_engage_comment are all sync `def`s. Each call to Groq's REST API blocks the asyncio loop for the request's duration (~200-800ms). For large fan-outs this serializes work and stalls anything else (e.g. concurrent scrapes). Wrap with `await asyncio.to_thread(...)` or use the async Groq client."
+  },
+  {
+    "severity": "HIGH",
+    "where": "test_connect_manual.py:final",
+    "title": "Top-level `asyncio.run(main())` with no __main__ guard",
+    "detail": "Importing test_connect_manual.py (which any test discovery / static analyzer will do) triggers a real LinkedIn session. Wrap in `if __name__ == '__main__': asyncio.run(main())`."
+  },
+  {
+    "severity": "HIGH",
+    "where": "test_feed_scout.py:final",
+    "title": "Top-level `asyncio.run(main())` with no __main__ guard",
+    "detail": "Importing test_feed_scout.py (which any test discovery / static analyzer will do) triggers a real LinkedIn session. Wrap in `if __name__ == '__main__': asyncio.run(main())`."
+  },
+  {
+    "severity": "HIGH",
+    "where": "test_recent_jobs.py:final",
+    "title": "Top-level `asyncio.run(main())` with no __main__ guard",
+    "detail": "Importing test_recent_jobs.py (which any test discovery / static analyzer will do) triggers a real LinkedIn session. Wrap in `if __name__ == '__main__': asyncio.run(main())`."
+  },
+  {
+    "severity": "MEDIUM",
+    "where": "agents/connection.py:34-91",
+    "title": "Per-profile work isn't wrapped in `step.run` \u2014 Inngest retries duplicate side effects",
+    "detail": "The for-loop calls `db.connections.update_one(... upsert=True)` and `ActionQueue.push(...)` directly. If the function fails after queuing some but not all profiles, Inngest retries from the top \u2014 those already-queued profiles will be queued AGAIN (upsert skips DB dup, but ActionQueue has no idempotency key). Move each profile's mutations under `step.run('process-' + url, ...)`."
+  },
+  {
+    "severity": "MEDIUM",
+    "where": "browser/easy_apply.py:168-170",
+    "title": "Resume upload step silently returns when file missing",
+    "detail": "If APPLICANT_RESUME_PATH points at a non-existent file, `_handle_resume` no-ops. The Easy Apply walker then advances to the next step thinking the upload succeeded, often hitting a backend validation failure that wastes an application slot. Either raise a needs_human signal here or pre-validate the resume on startup."
+  }
+]

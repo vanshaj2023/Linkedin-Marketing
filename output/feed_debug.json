@@ -1,0 +1,51 @@
+{
+  "url": "https://www.linkedin.com/feed/",
+  "title": "Feed | LinkedIn",
+  "wait_results": {
+    "main_visible": true,
+    "any_post_selector": "fail: Page.wait_for_selector: Timeout 20000ms exceeded.\nCall log:\nwaiting for locator(\"[data-urn^='urn:li:activity'], [data-id^='urn:li:activity'], div.feed-shared-update-v2, div.fie-impression-container, div.occludable-update\") to be visible\n"
+  },
+  "flags": {
+    "has_main": true,
+    "has_feed_container": false,
+    "has_login_form": false,
+    "has_captcha": false,
+    "has_checkpoint_text": false,
+    "has_empty_state": false,
+    "body_text_first_500": "0 notifications\nSkip to search\nSkip to main content\nSkip to sidebar\nSkip to primary content\nSkip to aside\nHome\n1\nMy Network\nJobs\nMessaging\n16\nNotifications\nMe\nFor Business\n\nTry Premium for ₹0\n\nVanshaj Agrawal\n\n--\n\nChhapra, Bihar\n\nExperience\n\nGain exclusive tools & insights\n\nRedeem Premium for ₹0\n\nConnections\n\nGrow your network\n\n16\n\nSaved items\n\nGroups\n\nNewsletters\n\nEvents\n\nStart a post\n\nVideo\n\nPhoto\n\nWrite article\n\nSort by: Top\n\nFeed post\n\nRecommended for you\n\nBill Gates \n\nChair, Gates Foundatio"
+  },
+  "counts": {
+    "div[data-urn^=\"urn:li:activity\"]": 0,
+    "[data-urn^=\"urn:li:activity\"]": 0,
+    "div[data-id^=\"urn:li:activity\"]": 0,
+    "[data-id^=\"urn:li:activity\"]": 0,
+    "div.feed-shared-update-v2": 0,
+    "div.fie-impression-container": 0,
+    "div.occludable-update": 0,
+    "div[data-finite-scroll-hotkey-item]": 0,
+    "main .scaffold-finite-scroll__content > div": 0,
+    "main [role=\"article\"]": 0,
+    "a[href*=\"urn:li:activity\"]": 0,
+    "main > div": 1
+  },
+  "samples": {
+    "main > div": [
+      {
+        "tag": "DIV",
+        "cls": "_067cd864 ad5f6341 c008f73a _8466ec86 b203c383 _6bf85be7 _81f65503 _1bab6fd2 _948de681 d0788b34 ff4490a1 _73fb15b7",
+        "id": "",
+        "attrs": [
+          "class=\"_067cd864 ad5f6341 c008f73a _8466ec86 b203c383 _6bf85be7 _81\""
+        ]
+      }
+    ]
+  },
+  "mainChildren": [
+    {
+      "tag": "DIV",
+      "cls": "_067cd864 ad5f6341 c008f73a _8466ec86 b203c383 _6bf85be7 _81f65503 _1bab6fd2 _948de681 d0788b34 ff44",
+      "id": "",
+      "child_count": 1
+    }
+  ]
+}
